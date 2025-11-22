@@ -1,0 +1,44 @@
+# Default configuration for GNN timing predictor training
+
+model:
+  type: "HeterogeneousTimingGNN"
+  in_channels: 10              # Node feature dimension
+  hidden_channels: 128         # Hidden layer dimension
+  num_classes: 2               # Binary classification
+  num_layers: 3                # Number of GAT layers
+  attention_heads: 4           # Number of attention heads
+  dropout: 0.2                 # Dropout probability
+  edge_dim: 3                  # Edge feature dimension
+
+training:
+  batch_size: 4                # Number of graphs per batch
+  learning_rate: 0.001         # Adam learning rate
+  weight_decay: 0.00001        # L2 regularization
+  max_epochs: 100              # Maximum training epochs
+  early_stop_patience: 20      # Early stopping patience
+  class_weights: [1.0, 3.0]    # [safe, violating] class weights (for imbalance)
+  gradient_clip: 1.0           # Gradient clipping threshold
+
+data:
+  train_split: 0.6             # Fraction for training
+  val_split: 0.2               # Fraction for validation
+  test_split: 0.2              # Fraction for testing
+  feature_dim: 10              # Node feature dimension
+  num_workers: 0               # DataLoader workers
+
+evaluation:
+  metrics:
+    - "roc_auc"                # ROC-AUC score
+    - "pr_auc"                 # Precision-Recall AUC
+    - "f1_score"               # F1 score
+    - "precision"              # Precision
+    - "recall"                 # Recall
+    - "accuracy"               # Accuracy
+  cross_design: true           # Evaluate cross-design generalization
+  per_design_breakdown: true   # Per-design metrics breakdown
+
+experiment:
+  name: "gnn_timing_predictor_default"
+  seed: 42
+  save_predictions: true       # Save predictions to CSV
+  save_figures: true           # Save ROC/PR curves
