@@ -27,11 +27,11 @@ import seaborn as sns
 import time
 
 import sys
-sys.path.append(str(Path(__file__).parent.parent))
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from models.timing_gnn import HeterogeneousTimingGNN
-from data.dataset import TimingDataset
-from training.utils import load_checkpoint
+from src.models.timing_gnn import HeterogeneousTimingGNN
+from src.data.dataset import TimingDataset
+from src.training.utils import load_checkpoint
 
 
 class Evaluator:
@@ -181,7 +181,7 @@ class Evaluator:
         
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-logger.info(f"Saved ROC curve to {save_path}")
+            logger.info(f"Saved ROC curve to {save_path}")
         plt.close()
     
     def plot_pr_curve(self, results, save_path=None):

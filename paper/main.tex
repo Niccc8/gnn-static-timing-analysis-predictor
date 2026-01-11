@@ -1,0 +1,56 @@
+\documentclass[10pt,twocolumn,journal]{IEEEtran}
+
+% Packages
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+% Document metadata
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{Learning Timing Criticality: A Ranking-Based Graph Neural Network Framework for Static Timing Analysis Prediction}
+
+\author{\IEEEauthorblockN{[Author Name]}
+\IEEEauthorblockA{\textit{[Department]} \\
+\textit{[University]}\\
+[City, Country] \\
+[email@university.edu]}
+}
+
+\maketitle
+
+\begin{abstract}
+Static Timing Analysis (STA) is the gold standard for timing verification in VLSI design, but its runtime (1--2 hours for modern designs) creates a bottleneck during iterative place-and-route optimization. We present \textit{RankSTA}, a heterogeneous Graph Neural Network framework that predicts timing violations 5--20$\times$ faster than full STA while maintaining $>$95\% ROC-AUC accuracy on cross-design test sets. Our key contributions are: (1) A dual-edge heterogeneous DAG representation capturing both interconnect and logic dependencies; (2) A 3-layer Graph Attention Network with multi-head attention that learns timing-critical connections; (3) A novel \textbf{ranking-based prediction strategy} that outperforms traditional threshold-based methods by 52\% relative improvement in recall, eliminating per-circuit calibration; and (4) An adaptive K-selection algorithm that automatically determines inspection budgets based on predicted violation density. Experimental results on 21 open-source designs (Sky130 PDK) demonstrate that our approach achieves 0.96 ROC-AUC and 0.92 PR-AUC, catching 78\% of violations by inspecting only the top 5\% riskiest nodes. We demonstrate practical impact through an Engineering Change Order (ECO) workflow, showing 10--20$\times$ speedup compared to traditional global re-optimization. Our framework enables surgical timing fixes, targeted path-based analysis, and faster design iterations---critical capabilities for modern VLSI design flows.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Static Timing Analysis, Graph Neural Networks, Graph Attention Networks, VLSI Design Automation, Timing Prediction, Machine Learning for EDA, Engineering Change Orders
+\end{IEEEkeywords}
+
+% Include section files
+\input{sections/introduction}
+\input{sections/related_work}
+\input{sections/problem_formulation}
+\input{sections/methodology}
+\input{sections/experimental_setup}
+\input{sections/results}
+\input{sections/discussion}
+\input{sections/conclusion}
+
+\section*{Acknowledgments}
+This work was supported by [funding source]. We thank the OpenROAD project for OpenSTA and the TimingPredict authors for the dataset.
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

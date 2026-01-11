@@ -19,75 +19,63 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
+*.log
 
-# Virtual Environments
-venv/
-ENV/
-env/
-.venv
-
-# Jupyter Notebook
-.ipynb_checkpoints
-*.ipynb_checkpoints
-
-# PyTorch Models
+# PyTorch
 *.pth
 *.pt
 *.ckpt
 
-# Datasets (large files)
-data/raw/
-data/processed/
-data/splits/
-*.v
-*.lib
-*.def
-*.spef
-*.json
-*.csv
+# Jupyter
+.ipynb_checkpoints
+*.ipynb_checkpoints
 
-# Experiment Outputs
-experiments/logs/
-experiments/checkpoints/
-experiments/results/
-*.log
-*.out
-
-# OS
-.DS_Store
-Thumbs.db
+# IDEs
+.vscode/
+.idea/
 *.swp
 *.swo
 *~
+.DS_Store
 
-# IDE
-.vscode/
-.idea/
-*.sublime-*
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
 
-# LaTeX
-paper/*.aux
-paper/*.bbl
-paper/*.blg
-paper/*.log
-paper/*.out
-paper/*.synctex.gz
-paper/*.fdb_latexmk
-paper/*.fls
-paper/*.toc
+# Data (large files)
+data/raw/
+data/processed/
+data/labels/
+data/splits/
+*.spef
+*.v
+*.sdc
+*.lib
 
-# Temporary
-*.tmp
-*.temp
-.cache/
+# Experiments
+experiments/logs/*/*
+experiments/checkpoints/*_temp.pth
+experiments/results/
 
-# Weights & Biases
-wandb/
+# Generated files
+parser.out
+parsetab.py
+*.zip
+temp_*/
 
-# Coverage
-.coverage
-htmlcov/
-.pytest_cache/
+# TensorBoard
+events.out.tfevents.*
 
-# Documentation Build
-docs/_build/
+# OS
+Thumbs.db
+.DS_Store
+
+# Archives
+*.tar.gz
+*.zip

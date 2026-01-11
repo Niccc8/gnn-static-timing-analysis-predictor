@@ -1,51 +1,111 @@
 """
-Dataset building script.
+Build TimingPredict Dataset
 
-Processes raw Verilog netlists into PyG Data objects:
-1. Parse netlists
-2. Build heterogeneous DAGs
-3. Extract features
-4. Attach labels from STA
-5. Save as PyG datasets
+This script processes raw Verilog netlists and OpenSTA labels into PyTorch Geometric datasets.
+It performs the following steps:
+1. Parses Verilog netlists to build heterogeneous DAGs (gates + nets).
+2. Extracts node and edge features (logic type, fanout, delay estimates).
+3. Maps OpenSTA timing labels (slack/violation) to graph nodes.
+4. Splits data into Train/Val/Test sets using a stratified strategy to ensure
+   balanced violation distribution across splits.
+
+Usage:
+    python scripts/build_dataset.py
 """
 
-import argparse
-import pandas as pd
-import torch
-from pathlib import Path
-from glob import glob
-from tqdm import tqdm
-from loguru import logger
 import sys
+import torch
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from loguru import logger
+from typing import Dict, List, Optional, Tuple
+from torch_geometric.data import Data
 
+# Add project root to path
 sys.path.append(str(Path(__file__).parent.parent))
 
-from data.netlist_parser import VerilogParser
-from data.graph_builder import TimingDAGBuilder
-from data.feature_extractor import FeatureExtractor
-from data.dataset import TimingDataset
+from src.data.simple_parser import SimpleVerilogParser
+from src.data.graph_builder import TimingDAGBuilder
+from src.data.feature_extractor import FeatureExtractor
+from src.data.dataset import TimingDataset
 
 
-def process_netlist(verilog_file, labels_df, feature_extractor):
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+
+# Stratified Split Configuration
+# Ensures high-violation designs are present in training to prevent class collapse.
+# Total: 21 designs
+DESIGN_SPLITS = {
+    'train': [
+        # High-violation designs (Critical for learning)
+        'aes256', 'jpeg_encoder', 'aes128',
+        # Low/Zero-violation designs (Regularization)
+        'synth_ram', 'blabla', 'cic_decimator', 'spm', 'zipdiv',
+        'usb', 'y_huff', 'usb_cdc_core', 'wbqspiflash'
+    ],
+    'val': [
+        'aes192', 'picorv32a', 'xtea', 'genericfir', 'salsa20'
+    ],
+    'test': [
+        'des', 'BM64', 'aes_cipher', 'usbf_device'
+    ]
+}
+
+PATHS = {
+    'raw_data': Path("data/raw/timing_predict_data"),
+    'labels': Path("data/labels/node_level"),
+    'processed': Path("data/processed/timing_predict")
+}
+
+
+# ==============================================================================
+# CORE LOGIC
+# ==============================================================================
+
+def process_design(
+    design_dir: Path, 
+    label_dir: Path, 
+    feature_extractor: FeatureExtractor
+) -> Optional[Data]:
     """
-    Process a single netlist into PyG Data object.
+    Process a single design directory into a PyG Data object.
     
     Args:
-        verilog_file: Path to Verilog file
-        labels_df: DataFrame with timing labels
-        feature_extractor: FeatureExtractor instance
-    
-    Returns:
-        PyG Data object or None if processing fails
-    """
-    try:
-        # Step 1: Parse netlist
-        parser = VerilogParser(verilog_file)
-        if not parser.parse():
-            logger.error(f"Failed to parse {verilog_file}")
-            return None
+        design_dir: Path to design directory containing Verilog file
+        label_dir: Path to directory containing label CSVs
+        feature_extractor: Initialized FeatureExtractor instance
         
-        # Step 2: Build DAG
+    Returns:
+        PyG Data object if successful, None otherwise
+    """
+    design_name = design_dir.name
+    
+    # 1. Locate Files
+    verilog_files = list(design_dir.glob("*.v"))
+    if not verilog_files:
+        logger.warning(f"Skipping {design_name}: No Verilog file found")
+        return None
+    
+    verilog_file = verilog_files[0]
+    label_file = label_dir / f"{design_name}_node_labels.csv"
+    
+    if not label_file.exists():
+        logger.warning(f"Skipping {design_name}: No label file found at {label_file}")
+        return None
+
+    try:
+        # 2. Parse Netlist
+        logger.info(f"[{design_name}] Parsing netlist...")
+        parser = SimpleVerilogParser(str(verilog_file))
+        if not parser.parse():
+            logger.error(f"[{design_name}] Parsing failed")
+            return None
+
+        # 3. Build Graph (DAG)
+        logger.info(f"[{design_name}] Building graph...")
         builder = TimingDAGBuilder(
             parser.gates,
             parser.nets,
@@ -54,28 +114,46 @@ def process_netlist(verilog_file, labels_df, feature_extractor):
         )
         graph, pin_to_id, levels = builder.build()
         
-        # Step 3: Extract features
+        if graph.number_of_nodes() == 0:
+            logger.error(f"[{design_name}] Graph is empty")
+            return None
+
+        # 4. Extract Features
+        logger.info(f"[{design_name}] Extracting features...")
         node_features = feature_extractor.extract_node_features(graph, levels)
         edge_features = feature_extractor.extract_edge_features(graph)
         
-        # Step 4: Build edge index
+        # Build edge index
         edge_list = list(graph.edges())
+        if not edge_list:
+            logger.warning(f"[{design_name}] No edges found")
+            return None
+            
         edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
+
+        # 5. Map Labels
+        logger.info(f"[{design_name}] Mapping labels...")
+        df = pd.read_csv(label_file)
         
-        # Step 5: Attach labels
+        # Create label tensor (default -1 for unlabeled)
         num_nodes = graph.number_of_nodes()
-        labels = torch.full((num_nodes,), -1, dtype=torch.long)  # -1 = unlabeled
+        labels = torch.full((num_nodes,), -1, dtype=torch.long)
         
-        # Match labels to nodes
-        design_name = Path(verilog_file).stem
-        design_labels = labels_df[labels_df.get('design', '') == design_name]
+        # Create fast lookup map
+        label_map = dict(zip(df['endpoint'], df['label']))
         
-        for endpoint_name, row in design_labels.iterrows():
-            if endpoint_name in pin_to_id:
-                node_id = pin_to_id[endpoint_name]
-                labels[node_id] = int(row['is_violating'])
+        mapped_count = 0
+        violation_count = 0
         
-        # Create PyG Data object
+        for pin_name, node_id in pin_to_id.items():
+            if pin_name in label_map:
+                label = int(label_map[pin_name])
+                labels[node_id] = label
+                mapped_count += 1
+                if label == 1:
+                    violation_count += 1
+        
+        # 6. Create Data Object
         data = TimingDataset.create_pyg_data(
             node_features=torch.FloatTensor(node_features),
             edge_index=edge_index,
@@ -84,89 +162,91 @@ def process_netlist(verilog_file, labels_df, feature_extractor):
             design_name=design_name
         )
         
-        logger.info(
-            f"✓ Processed {design_name}: "
-            f"{data.num_nodes} nodes, {data.edge_index.size(1)} edges"
+        logger.success(
+            f"✓ {design_name}: {data.num_nodes} nodes, "
+            f"{mapped_count} labeled ({violation_count} violations)"
         )
         return data
-        
+
     except Exception as e:
-        logger.error(f"Error processing {verilog_file}: {e}")
+        logger.exception(f"Error processing {design_name}: {e}")
         return None
 
 
-def main(args):
-    """Main dataset building function."""
-    # Load labels
-    logger.info(f"Loading labels from {args.labels}")
-    labels_df = pd.read_csv(args.labels, index_col='endpoint_name')
+def main():
+    """Execute dataset building pipeline."""
+    # Setup logging
+    logger.remove()
+    logger.add(sys.stderr, format="<green>{time:HH:mm:ss}</green> | <level>{message}</level>")
     
-    # Get all Verilog files
-    verilog_files = []
-    for pattern in args.netlists:
-        verilog_files.extend(glob(pattern))
+    logger.info("="*60)
+    logger.info("BUILDING TIMING PREDICTOR DATASET")
+    logger.info("="*60)
     
-    logger.info(f"Found {len(verilog_files)} Verilog files")
+    # Ensure directories exist
+    PATHS['processed'].mkdir(parents=True, exist_ok=True)
     
-    # Create feature extractor
+    if not PATHS['raw_data'].exists():
+        logger.error(f"Raw data directory not found: {PATHS['raw_data']}")
+        return
+
+    # Initialize Feature Extractor
     feature_extractor = FeatureExtractor(normalize=True)
     
-    # Process all netlists
-    data_list = []
-    for verilog_file in tqdm(verilog_files, desc="Processing netlists"):
-        data = process_netlist(verilog_file, labels_df, feature_extractor)
-        if data is not None:
-            data_list.append(data)
+    # Process All Designs
+    design_dirs = sorted([d for d in PATHS['raw_data'].iterdir() 
+                         if d.is_dir() and d.name != "techlib"])
     
-    logger.info(f"Successfully processed {len(data_list)}/{len(verilog_files)} netlists")
+    logger.info(f"Found {len(design_dirs)} design directories")
     
-    if len(data_list) == 0:
-        logger.error("No netlists were successfully processed!")
+    processed_data: Dict[str, Data] = {}
+    
+    for design_dir in design_dirs:
+        data = process_design(design_dir, PATHS['labels'], feature_extractor)
+        if data:
+            processed_data[design_dir.name] = data
+            
+    if not processed_data:
+        logger.error("No designs were successfully processed. Exiting.")
         return
+
+    # Split Data
+    logger.info("\nSplitting data...")
+    splits: Dict[str, List[Data]] = {'train': [], 'val': [], 'test': []}
     
-    # Split into train/val/test
-    num_graphs = len(data_list)
-    num_train = int(num_graphs * args.train_split)
-    num_val = int(num_graphs * args.val_split)
+    for split_name, design_names in DESIGN_SPLITS.items():
+        for name in design_names:
+            if name in processed_data:
+                splits[split_name].append(processed_data[name])
+            else:
+                logger.warning(f"Design '{name}' assigned to {split_name} but was not processed.")
+
+    # Validate and Save
+    for split_name, data_list in splits.items():
+        if not data_list:
+            logger.warning(f"Split '{split_name}' is empty!")
+            continue
+            
+        # Stats
+        total_nodes = sum(d.num_nodes for d in data_list)
+        total_viols = sum((d.y == 1).sum().item() for d in data_list)
+        viol_rate = (total_viols / total_nodes * 100) if total_nodes > 0 else 0
+        
+        logger.info(f"  {split_name.upper():<5}: {len(data_list):>2} designs | "
+                   f"{total_nodes:>7,} nodes | {total_viols:>5,} violations ({viol_rate:.2f}%)")
+        
+        # Save
+        save_path = PATHS['processed'] / f"{split_name}.pt"
+        TimingDataset.save_dataset(data_list, str(save_path))
+        logger.info(f"    Saved to {save_path}")
+
+    # Save Feature Scaler
+    scaler_path = PATHS['processed'] / "feature_scaler.pkl"
+    feature_extractor.save_scaler(str(scaler_path))
+    logger.info(f"    Saved feature scaler to {scaler_path}")
     
-    train_data = data_list[:num_train]
-    val_data = data_list[num_train:num_train+num_val]
-    test_data = data_list[num_train+num_val:]
-    
-    logger.info(f"Split: Train={len(train_data)}, Val={len(val_data)}, Test={len(test_data)}")
-    
-    # Save datasets
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    TimingDataset.save_dataset(train_data, str(output_dir / "train.pt"))
-    TimingDataset.save_dataset(val_data, str(output_dir / "val.pt"))
-    TimingDataset.save_dataset(test_data, str(output_dir / "test.pt"))
-    
-    # Save feature scaler
-    feature_extractor.save_scaler(str(output_dir / "feature_scaler.pkl"))
-    
-    logger.info(f"✓ Dataset building complete! Saved to {output_dir}")
+    logger.success("\n✅ Dataset build complete!")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Build PyG dataset from netlists")
-    
-    parser.add_argument("--netlists", nargs="+", required=True,
-                        help="Glob patterns for Verilog files")
-    parser.add_argument("--labels", type=str, required=True,
-                        help="Path to labels CSV file")
-    parser.add_argument("--output_dir", type=str, default="data/processed",
-                        help="Output directory for processed datasets")
-    parser.add_argument("--train_split", type=float, default=0.6,
-                        help="Fraction of data for training")
-    parser.add_argument("--val_split", type=float, default=0.2,
-                        help="Fraction of data for validation")
-    
-    args = parser.parse_args()
-    
-    # Validate splits
-    if args.train_split + args.val_split >= 1.0:
-        parser.error("train_split + val_split must be < 1.0")
-    
-    main(args)
+    main()

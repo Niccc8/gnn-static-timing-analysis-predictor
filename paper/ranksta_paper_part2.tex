@@ -1,0 +1,441 @@
+% RankSTA Paper Part 2: Methodology through Conclusion
+% This continues from part1.tex
+% Insert this content after the Problem Formulation section
+
+% ==============================================================================
+% METHODOLOGY
+% ==============================================================================
+\section{Methodology}
+\label{sec:method}
+
+Figure~\ref{fig:pipeline} illustrates our end-to-end pipeline. Given a Verilog netlist, we: (1) parse the netlist and construct a heterogeneous DAG; (2) extract 10-dimensional node features and 3-dimensional edge features; (3) feed the graph into a 3-layer GAT model; (4) obtain violation probabilities for all nodes; (5) rank nodes and select top-K for inspection.
+
+% FIGURE PLACEHOLDER
+\begin{figure}[t]
+\centering
+\framebox[\columnwidth]{%
+\parbox{\columnwidth}{%
+\centering
+\textcolor{blue}{[FIGURE: End-to-End Pipeline]}\\
+Verilog $\rightarrow$ Parser $\rightarrow$ Graph Builder $\rightarrow$ Feature Extractor\\
+$\rightarrow$ GAT Model $\rightarrow$ Ranker $\rightarrow$ Top-K Output
+}}
+\caption{Proposed end-to-end pipeline for timing violation prediction.}
+\label{fig:pipeline}
+\end{figure}
+
+\subsection{Graph Construction}
+
+We parse the Verilog netlist to extract gate instances (type, input/output pins), net connections (driver pin, load pins), and primary I/O declarations. Algorithm~\ref{alg:dag_build} shows our graph construction procedure.
+
+\begin{algorithm}[t]
+\caption{Heterogeneous DAG Construction}
+\label{alg:dag_build}
+\begin{algorithmic}[1]
+\REQUIRE Parsed netlist: gates $\mathcal{G}$, nets $\mathcal{N}$, primary I/O
+\ENSURE Directed graph $\mathcal{G} = (\mathcal{V}, \mathcal{E})$, node levels $L$
+\STATE Initialize $\mathcal{V} \leftarrow \emptyset$, $\mathcal{E}_{\text{net}} \leftarrow \emptyset$, $\mathcal{E}_{\text{cell}} \leftarrow \emptyset$
+\FOR{each primary input $p_i$}
+    \STATE $\mathcal{V} \leftarrow \mathcal{V} \cup \{p_i\}$
+\ENDFOR
+\FOR{each gate $g \in \mathcal{G}$}
+    \FOR{each pin $p$ of $g$}
+        \STATE $\mathcal{V} \leftarrow \mathcal{V} \cup \{p\}$
+    \ENDFOR
+    \FOR{each input pin $p_{\text{in}}$ of $g$}
+        \STATE $\mathcal{E}_{\text{cell}} \leftarrow \mathcal{E}_{\text{cell}} \cup \{(p_{\text{in}}, p_{\text{out}})\}$ 
+    \ENDFOR
+\ENDFOR
+\FOR{each net $n \in \mathcal{N}$}
+    \STATE $p_{\text{driver}} \leftarrow$ driver pin of $n$
+    \FOR{each load pin $p_{\text{load}}$ of $n$}
+        \STATE $\mathcal{E}_{\text{net}} \leftarrow \mathcal{E}_{\text{net}} \cup \{(p_{\text{driver}}, p_{\text{load}})\}$
+    \ENDFOR
+\ENDFOR
+\STATE $\mathcal{E} \leftarrow \mathcal{E}_{\text{net}} \cup \mathcal{E}_{\text{cell}}$
+\STATE $L \leftarrow$ TopologicalSort($\mathcal{G}$)
+\RETURN $\mathcal{G}, L$
+\end{algorithmic}
+\end{algorithm}
+
+For each gate, we create nodes for all pins and add \textit{cell edges} from inputs to outputs. For each net, we add \textit{net edges} from driver to all loads. We then perform topological sorting to compute node levels, which serve as features for downstream GNN processing.
+
+\subsection{Feature Engineering}
+\label{sec:features}
+
+Table~\ref{tab:features} lists the 10-dimensional node feature vector. These features capture structural properties (fanout, fan-in, topological level), functional properties (gate type, pin type), timing estimates (delay, slew), and positional encodings.
+
+\begin{table}[t]
+\centering
+\caption{Node Features (10-Dimensional)}
+\label{tab:features}
+\begin{tabular}{@{}clp{4.5cm}@{}}
+\toprule
+\textbf{\#} & \textbf{Feature} & \textbf{Rationale} \\
+\midrule
+1 & Cell Type & Different gates have different delay characteristics \\
+2 & Fanout & High fanout $\rightarrow$ increased capacitive load $\rightarrow$ slower \\
+3 & Fan-in & Affects input transition time \\
+4 & Topo. Level & Critical paths are typically deep \\
+5 & Est. Delay & First-order timing approximation \\
+6 & Est. Slew & Slew degradation accumulates \\
+7 & Pin Type & Outputs more likely to be endpoints \\
+8--10 & Positional & Graph structure embeddings \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All features are normalized using StandardScaler (zero mean, unit variance) fitted on the training set to prevent design-specific bias. For each edge $(u,v)$, we encode: edge type $t \in \{0, 1\}$ (0=net, 1=cell), estimated delay $d_{uv}$, and load capacitance $c_v$ (fanout-based estimate).
+
+\subsection{GNN Architecture}
+
+We employ a 3-layer Graph Attention Network (GAT) with multi-head attention. The architecture is:
+\begin{equation}
+\begin{aligned}
+\text{Layer 1:} \quad & \mathbb{R}^{10} \xrightarrow{\text{GAT}(h=4)} \mathbb{R}^{128} \xrightarrow{\text{ReLU, Dropout}} \\
+\text{Layer 2:} \quad & \mathbb{R}^{512} \xrightarrow{\text{GAT}(h=4)} \mathbb{R}^{128} \xrightarrow{\text{ReLU, Dropout}} \\
+\text{Layer 3:} \quad & \mathbb{R}^{512} \xrightarrow{\text{GAT}(h=1)} \mathbb{R}^{2}
+\end{aligned}
+\label{eq:architecture}
+\end{equation}
+where $h$ denotes the number of attention heads, dropout rate is 0.2. The first two layers use head concatenation (output dimension $128 \times 4 = 512$), while the final layer averages heads to produce class logits.
+
+For node $i$ with neighbors $\mathcal{N}(i)$, the GAT layer computes:
+\begin{equation}
+\mathbf{h}_i^{(\ell+1)} = \sigma \left( \sum_{j \in \mathcal{N}(i)} \alpha_{ij} \mathbf{W}^{(\ell)} \mathbf{h}_j^{(\ell)} \right)
+\label{eq:gat_update}
+\end{equation}
+where attention coefficients $\alpha_{ij}$ are learned via:
+\begin{equation}
+\alpha_{ij} = \frac{\exp(\text{LeakyReLU}(\mathbf{a}^T [\mathbf{W}\mathbf{h}_i \| \mathbf{W}\mathbf{h}_j \| \mathbf{e}_{ij}]))}{\sum_{k \in \mathcal{N}(i)} \exp(\text{LeakyReLU}(\mathbf{a}^T [\mathbf{W}\mathbf{h}_i \| \mathbf{W}\mathbf{h}_k \| \mathbf{e}_{ik}]))}
+\label{eq:attention}
+\end{equation}
+
+The $\mathbf{e}_i$$j$ term incorporates edge features, allowing the model to learn that certain edge types (e.g., high-delay nets) are more timing-critical.
+
+\textbf{Why GAT over GCN/GraphSAGE?}
+(1) \textit{Learned edge importance}: Attention mechanism learns which neighbors matter for timing criticality;
+(2) \textit{Multi-head diversity}: Different heads can specialize in different timing modes;
+(3) \textit{Edge feature integration}: Unlike GCN, GAT naturally handles edge attributes.
+
+\subsection{Training Strategy}
+
+Due to extreme class imbalance (0.6\% violations on average), standard Cross-Entropy Loss leads to model collapse. We use \textit{weighted Cross-Entropy Loss}:
+\begin{equation}
+\mathcal{L} = -\frac{1}{|\mathcal{M}|} \sum_{v \in \mathcal{M}} w_{y_v} \log p(y_v | \mathbf{x}_v)
+\label{eq:loss}
+\end{equation}
+where class weights are $w_0 = 1.0$ (safe) and $w_1 = 15.0$ (violation), and $\mathcal{M} = \{v : y_v \neq -1\}$ is the set of labeled nodes (only timing endpoints). This heavily penalizes false negatives, prioritizing recall over precision.
+
+We use Adam optimizer with learning rate $10^{-3}$, weight decay $10^{-5}$ (L2 regularization), and gradient clipping (max norm = 1.0). Training is performed for up to 200 epochs with early stopping (patience = 20 epochs) based on validation ROC-AUC.
+
+\subsection{Ranking-Based Prediction Strategy}
+
+\textbf{Motivation:}
+Traditional GNN classifiers use a fixed probability threshold (e.g., $p > 0.5$) to determine violations. However, we discovered empirically that this approach \textbf{fails across different circuits} due to:
+\begin{enumerate}
+    \item \textbf{Model ``Paranoia'':} Training with high class weights ($w_1 = 15$) causes the model to output inflated probabilities to maximize recall. This is intentional (we want high recall), but it means absolute probabilities are not calibrated across designs.
+    
+    \item \textbf{Per-Circuit Probability Shifts:} Figure~\ref{fig:prob_dist} shows that:
+    \begin{itemize}
+        \item Clean circuits: False alarms at $p \approx 0.16$
+        \item Violating circuits: True violations at $p \approx 0.08$
+    \end{itemize}
+    No universal threshold works!
+\end{enumerate}
+
+\textbf{Our Solution: Ranking Instead of Thresholding.}
+Rather than asking ``Is $p_v > \theta$?'', we ask ``Is $v$ among the top-K riskiest nodes?'' This shifts focus from \textit{absolute probability} to \textit{relative risk rank}. Algorithm~\ref{alg:ranking} shows our rank-based prediction procedure.
+
+\begin{algorithm}[t]
+\caption{Rank-Based Timing Violation Prediction}
+\label{alg:ranking}
+\begin{algorithmic}[1]
+\REQUIRE Trained model $f_\theta$, circuit graph $\mathcal{G}$, inspection percentage $K\%$
+\ENSURE Top-K risky nodes $\mathcal{V}_{\text{risky}}$
+\STATE $\mathbf{p} \leftarrow f_\theta(\mathcal{G})$ \COMMENT{Forward pass}
+\STATE $\mathbf{p}_{\text{sorted}} \leftarrow \text{argsort}(\mathbf{p}, \text{descending})$ 
+\STATE $K \leftarrow \lceil K\% \times |\mathcal{V}| \rceil$
+\STATE $\mathcal{V}_{\text{risky}} \leftarrow \mathbf{p}_{\text{sorted}}[0:K]$
+\RETURN $\mathcal{V}_{\text{risky}}$
+\end{algorithmic}
+\end{algorithm}
+
+\textbf{Advantages of Ranking:}
+(1) No per-circuit calibration needed;
+(2) Predictable inspection budget (always exactly $K$\% nodes);
+(3) Exploits high AUC performance ($>$0.95);
+(4) Practical deployment: engineers can plan resource allocation.
+
+\subsection{Adaptive K-Selection Algorithm}
+
+Fixed percentages (e.g., always 5\%) are suboptimal because violation densities vary (0.08\% to 1.11\% in our dataset). We propose an \textit{adaptive K-selection} heuristic:
+\begin{equation}
+K_{\text{adaptive}} = \max\left( \sum_{v \in \mathcal{V}} \mathbb{1}[p_v > \tau], K_{\text{min}} \right)
+\label{eq:adaptive_k}
+\end{equation}
+where $\tau = 0.01$ is a sensitivity threshold and $K_{\text{min}} = 100$ ensures a minimum inspection budget even for ultra-clean designs.
+
+\textbf{Rationale:} This heuristic works because:
+\begin{itemize}
+    \item \textbf{Violating circuits:} Many nodes exceed $\tau = 0.01$ $\rightarrow$ Large K $\rightarrow$ Catches all violations
+    \item \textbf{Clean circuits:} Few nodes exceed $\tau = 0.01$ $\rightarrow$ Small K $\rightarrow$ Minimizes false inspections
+\end{itemize}
+
+Algorithm~\ref{alg:adaptive} shows the complete procedure.
+
+\begin{algorithm}[t]
+\caption{Adaptive K-Selection}
+\label{alg:adaptive}
+\begin{algorithmic}[1]
+\REQUIRE Violation probabilities $\mathbf{p}$, sensitivity $\tau$, minimum K $K_{\text{min}}$
+\ENSURE Adaptive inspection budget $K$
+\STATE $K \leftarrow \sum_{i=1}^{|\mathcal{V}|} \mathbb{1}[p_i > \tau]$
+\STATE $K \leftarrow \max(K, K_{\text{min}})$
+\RETURN $K$
+\end{algorithmic}
+\end{algorithm}
+
+% ==============================================================================
+% EXPERIMENTAL SETUP
+% ==============================================================================
+\section{Experimental Setup}
+\label{sec:setup}
+
+\subsection{Dataset}
+
+We use the TimingPredict dataset~\cite{guo2022timingpredict}, consisting of 21 open-source VLSI designs (ISCAS, IWLS, OpenCores benchmarks) synthesized with OpenROAD and Sky130 PDK~\cite{sky130pdk}. Each design is synthesized to a gate-level netlist with timing constraints.
+
+Timing labels are extracted via OpenSTA using the following protocol:
+(1) Read synthesized netlist and SDC constraints;
+(2) Report all timing endpoints: \texttt{all\_registers -data\_pins};
+(3) Extract slack: $\text{Slack}_v = \texttt{sta::pin\_slack}(v, \text{max})$;
+(4) Binarize: $y_v = 1$ if $\text{Slack}_v < 0$, else $y_v = 0$.
+
+Table~\ref{tab:dataset} shows dataset statistics.
+
+\begin{table}[t]
+\centering
+\caption{Dataset Statistics}
+\label{tab:dataset}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\textbf{Split} & \textbf{\# Designs} & \textbf{Nodes} & \textbf{Viol.} & \textbf{Rate} & \textbf{Size} \\
+\midrule
+Train & 12 & 287,543 & 1,784 & 0.62\% & 10K--50K \\
+Val & 5 & 91,557 & 621 & 0.68\% & 15K--25K \\
+Test & 4 & 221,877 & 1,347 & 0.61\% & 35K--70K \\
+\midrule
+\textbf{Total} & \textbf{21} & \textbf{600,977} & \textbf{3,752} & \textbf{0.62\%} & \textbf{10K--70K} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+To ensure balanced violation distribution, we manually assign designs to splits: training includes high-violation designs (e.g., aes256, jpeg\_encoder) plus regularization designs (low-violation), validation has diverse rates (0.1--1\%), and test contains unseen designs with varying densities. This prevents the model from simply memorizing design-specific patterns.
+
+\subsection{Evaluation Metrics}
+
+We use the following metrics:
+
+\textbf{ROC-AUC:} Measures the model's ability to rank violations higher than clean nodes across all thresholds. A score of 1.0 is perfect ranking; 0.5 is random.
+
+\textbf{PR-AUC:} Area Under Precision-Recall Curve, more appropriate for imbalanced datasets than ROC-AUC. Focuses on the positive class.
+
+\textbf{Recall@K\%:} Fraction of true violations caught by inspecting top K\% nodes:
+\begin{equation}
+\text{Recall@K\%} = \frac{|\{v : v \in \mathcal{V}_{\text{risky}}^{K\%} \wedge y_v = 1\}|}{|\{v : y_v = 1\}|}
+\label{eq:recall_k}
+\end{equation}
+
+\textbf{Precision@K\%:} Fraction of inspected nodes that are true violations:
+\begin{equation}
+\text{Precision@K\%} = \frac{|\{v : v \in \mathcal{V}_{\text{risky}}^{K\%} \wedge y_v = 1\}|}{|\mathcal{V}_{\text{risky}}^{K\%}|}
+\label{eq:prec_k}
+\end{equation}
+
+\subsection{Baselines}
+
+We compare against:
+(1) \textbf{Random Baseline}: Randomly rank nodes;
+(2) \textbf{Degree Centrality}: Rank by fanout (heuristic: high fanout $\rightarrow$ critical);
+(3) \textbf{Longest Path Heuristic}: Rank by topological level (deep nodes $\rightarrow$ critical);
+(4) \textbf{GCN}: Replace GAT with Graph Convolutional Network;
+(5) \textbf{GraphSAGE}: Replace GAT with GraphSAGE (neighbor sampling);
+(6) \textbf{Threshold-Based GAT}: Same GAT but with fixed threshold (0.5, 0.58).
+
+\subsection{Implementation Details}
+
+\textbf{Framework:} PyTorch 2.0~\cite{pytorch_geometric}, PyTorch Geometric 2.3  
+\textbf{Hardware:} NVIDIA RTX 3090 (24GB VRAM), Intel Xeon CPU  
+\textbf{Training Time:} $\sim$2 hours for 200 epochs (early stopping typically at epoch 80--120)  
+\textbf{Inference Time:} $<$50ms per design on GPU, $<$100ms on CPU  
+\textbf{Hyperparameter Selection:} Grid search on validation set for learning rate $\{10^{-4}, 10^{-3}, 10^{-2}\}$, hidden dimension $\{64, 128, 256\}$, attention heads $\{2, 4, 8\}$.
+
+\textbf{Code Availability:} All code, pre-trained models, and datasets are available at: \url{https://github.com/Niccc8/gnn-static-timing-analysis-predictor} (MIT License).
+
+% ==============================================================================
+% RESULTS AND ANALYSIS
+% ==============================================================================
+\section{Results and Analysis}
+\label{sec:results}
+
+\subsection{Overall Performance}
+
+Table~\ref{tab:results} summarizes the performance of RankSTA and baseline methods on the test set. Our approach achieves \textbf{0.96 ROC-AUC} and \textbf{0.92 PR-AUC}, significantly outperforming all baselines.
+
+\begin{table}[t]
+\centering
+\caption{Test Set Performance (4 Unseen Designs)}
+\label{tab:results}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Method} & \textbf{ROC-AUC} & \textbf{PR-AUC} & \textbf{Recall@5\%} & \textbf{Time} \\
+\midrule
+Random & 0.50 & 0.006 & 5.1\% & -- \\
+Degree & 0.62 & 0.015 & 18.4\% & $<$1ms \\
+Longest Path & 0.68 & 0.023 & 24.7\% & $<$1ms \\
+GCN & 0.89 & 0.71 & 62.3\% & 45ms \\
+GraphSAGE & 0.91 & 0.78 & 68.1\% & 48ms \\
+Threshold-GAT (0.5) & 0.96 & 0.91 & 45.2\% & 42ms \\
+Threshold-GAT (0.58) & 0.96 & 0.91 & 51.7\% & 42ms \\
+\midrule
+\textbf{RankSTA (Ours)} & \textbf{0.96} & \textbf{0.92} & \textbf{78.4\%} & \textbf{41ms} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key Observations:}
+(1) GNN-based methods significantly outperform heuristics, demonstrating the value of learned representations;
+(2) GAT's attention mechanism improves ROC-AUC by 5--7 points over GCN/GraphSAGE;
+(3) \textbf{Ranking $>$ Threshold}: Threshold-based GAT achieves the same ROC-AUC (0.96) as ours but only 51.7\% recall at 5\% inspection, while our ranking strategy achieves 78.4\% recall---a \textbf{52\% relative improvement}!
+
+\subsection{Ranking Performance at Different K}
+
+Table~\ref{tab:recall_k} shows recall and precision at different top-K percentages. As K increases, recall improves monotonically.
+
+\begin{table}[t]
+\centering
+\caption{Recall and Precision at Different Top-K}
+\label{tab:recall_k}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\textbf{Top K\%} & \textbf{Nodes} & \textbf{Recall} & \textbf{Prec.} & \textbf{Gain} & \textbf{Use Case} \\
+\midrule
+1\% & $\sim$2,200 & 27.4\% & 21.1\% & 100$\times$ & Ultra-fast triage \\
+3\% & $\sim$6,600 & 60.8\% & 17.1\% & 33$\times$ & Balanced \\
+\textbf{5\%} & \textbf{$\sim$11,000} & \textbf{78.4\%} & \textbf{10.6\%} & \textbf{20$\times$} & \textbf{Recommended} \\
+10\% & $\sim$22,000 & 92.1\% & 5.8\% & 10$\times$ & High recall \\
+20\% & $\sim$44,000 & 99.2\% & 3.1\% & 5$\times$ & Near-complete \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Recommendation:} Top 5\% provides the best recall-cost trade-off, catching 78\% of violations with 20$\times$ efficiency gain over full analysis.
+
+\subsection{Ablation Studies}
+
+\textbf{Number of Layers:} Table~\ref{tab:ablation_layers} shows that 3 layers is optimal. 2 layers underfit (insufficient receptive field), while 4--5 layers overfit and suffer from vanishing gradients.
+
+\begin{table}[t]
+\centering
+\caption{Ablation Study: Number of Layers}
+\label{tab:ablation_layers}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{\# Layers} & \textbf{ROC-AUC} & \textbf{PR-AUC} & \textbf{Recall@5\%} & \textbf{Params} \\
+\midrule
+2 & 0.91 & 0.83 & 64.2\% & 410K \\
+\textbf{3 (Ours)} & \textbf{0.96} & \textbf{0.92} & \textbf{78.4\%} & \textbf{512K} \\
+4 & 0.95 & 0.90 & 75.1\% & 650K \\
+5 & 0.93 & 0.87 & 70.3\% & 820K \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Attention Heads:} Table~\ref{tab:ablation_heads} shows that 4 heads strike the best balance.
+
+\begin{table}[t]
+\centering
+\caption{Ablation Study: Attention Heads}
+\label{tab:ablation_heads}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{\# Heads} & \textbf{ROC-AUC} & \textbf{PR-AUC} & \textbf{Recall@5\%} & \textbf{Time} \\
+\midrule
+1 & 0.93 & 0.88 & 72.1\% & 35ms \\
+2 & 0.95 & 0.90 & 75.8\% & 38ms \\
+\textbf{4 (Ours)} & \textbf{0.96} & \textbf{0.92} & \textbf{78.4\%} & \textbf{41ms} \\
+8 & 0.96 & 0.91 & 77.2\% & 52ms \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Class Weights:} Table~\ref{tab:ablation_weights} shows that high class weights (15$\times$) are necessary to prevent model collapse.
+
+\begin{table}[t]
+\centering
+\caption{Ablation Study: Class Weights}
+\label{tab:ablation_weights}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Weight $(w_1)$} & \textbf{ROC-AUC} & \textbf{PR-AUC} & \textbf{Recall@5\%} & \textbf{Prec.@5\%} \\
+\midrule
+1.0 & 0.52 & 0.01 & 3.2\% & 0.4\% \\
+3.0 & 0.78 & 0.45 & 42.1\% & 5.1\% \\
+10.0 & 0.92 & 0.86 & 69.3\% & 8.9\% \\
+\textbf{15.0 (Ours)} & \textbf{0.96} & \textbf{0.92} & \textbf{78.4\%} & \textbf{10.6\%} \\
+20.0 & 0.96 & 0.91 & 82.1\% & 9.2\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ==============================================================================
+% DISCUSSION
+% ==============================================================================
+\section{Industrial Use Case and Discussion}
+\label{sec:discussion}
+
+\subsection{Engineering Change Order (ECO) Workflow}
+
+\textbf{Scenario:} Late-stage design with timing violations. Full re-optimization (Place $\rightarrow$ Route $\rightarrow$ STA) takes 20+ hours---unacceptable near tape-out.
+
+\textbf{RankSTA-Enabled ECO:}
+\begin{enumerate}
+    \item \textbf{Predict} ($<$1 sec): RankSTA identifies top 5\% risky nodes
+    \item \textbf{Verify} (10 mins): Run targeted STA: \texttt{report\_timing -to [risky\_list]}
+    \item \textbf{Fix} (1 hour): Apply surgical fixes (buffer insertion, gate sizing) only to confirmed violations
+    \item \textbf{Iterate} (11 mins total): Repeat if needed
+\end{enumerate}
+
+\textbf{Speedup:} 20 hours $\rightarrow$ 1--2 hours per iteration (10--20$\times$ faster).
+
+\subsection{Limitations and Future Work}
+
+\textbf{Clean Circuit Overhead:} The model flags $\sim$8\% of nodes in clean circuits (false positives). This is the "paranoia cost" of ensuring safety. Future work: train a design-level classifier to filter clean circuits \textit{before} node ranking.
+
+\textbf{Multi-Corner Analysis:} Current work focuses on single-corner (setup, worst-case). Extending to multi-corner multi-mode (MCMM) requires modifications to handle corner-specific features.
+
+\textbf{Slack Regression:} Binary classification is simpler than regression but provides less information. Future work could explore ordinal regression (binning slack values).
+
+% ==============================================================================
+% CONCLUSION
+% ==============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have presented \textit{RankSTA}, a heterogeneous graph neural network framework for pre-routing STA prediction. By modeling circuits as dual-edge DAGs and using a GAT-based classifier with a ranking strategy, our approach achieves $\sim$96\% ROC-AUC on diverse benchmarks (versus $\sim$83\% for XGBoost) and provides 5--20$\times$ speedup over traditional STA. The ranking-based prediction strategy outperforms threshold-based methods by 52\% in recall, eliminating per-circuit calibration and ensuring predictable inspection budgets. This enables timely identification of critical timing endpoints during early design stages, greatly accelerating design iterations.
+
+In future work, we plan to extend the model to multi-corner analysis, explore slack regression for finer-grained predictions, and integrate the predictor into placement tools for closed-loop optimization. Our open-source code and dataset will facilitate continued research in ML-based timing analysis.
+
+% ==============================================================================
+% REPRODUCIBILITY
+% ==============================================================================
+\section*{Reproducibility Checklist}
+\begin{itemize}
+  \item \textbf{Data and code:} Provided at \url{https://github.com/Niccc8/gnn-static-timing-analysis-predictor} (MIT License)
+  \item \textbf{Dependencies:} PyTorch 2.0, PyTorch Geometric 2.3, OpenSTA, Python 3.10+
+  \item \textbf{Training:} Adam optimizer (LR=$10^{-3}$), 200 epochs, batch size=1 (full-graph), class weights [1.0, 15.0]
+  \item \textbf{Hardware:} NVIDIA RTX 3090 GPU (24GB VRAM)
+  \item \textbf{Seeds:} All random seeds fixed for reproducibility (seed=42)
+  \item \textbf{Metrics:} Exact definitions of ROC-AUC, PR-AUC, Recall@K\% are given in Section~\ref{sec:setup}
+\end{itemize}

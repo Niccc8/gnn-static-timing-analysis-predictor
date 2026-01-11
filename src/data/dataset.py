@@ -149,7 +149,7 @@ def load_labels_from_csv(csv_file: str) -> pd.DataFrame:
     Returns:
         DataFrame with labels
     """
-    df = pd.DataFrame(csv_file, index_col="endpoint_name")
+    df = pd.read_csv(csv_file, index_col="endpoint_name")
     logger.info(f"Loaded {len(df)} labels from {csv_file}")
     return df
 
